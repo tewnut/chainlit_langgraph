@@ -1,16 +1,13 @@
-import chainlit as cl
-from chat_workflow.workflows.base import BaseWorkflow, BaseState
-from langgraph.graph import StateGraph, END, START
+from ..llm import llm_factory, ModelCapability
+from ..tools import BasicToolNode
 from chainlit.input_widget import Select
+from chat_workflow.workflows.base import BaseWorkflow, BaseState
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import Runnable, RunnableConfig
-from ..llm import llm_factory, ModelCapability
+from langgraph.graph import StateGraph, END
 from typing import List, Literal
 from typing_extensions import TypedDict
-from ..tools import BasicToolNode
-
-agents = ["business_analyst", "coder", "responder"]
-
+import chainlit as cl
 
 class BAResponse(TypedDict):
     """Structured response for ba_node."""
@@ -84,7 +81,7 @@ class OdooGPTWorkflow(BaseWorkflow):
                 values=sorted(llm_factory.list_models(
                     capabilities=self.capabilities)),
                 initial_index=-1,
-            ),
+            )
         ])
 
     def create_default_state(self) -> GraphState:
