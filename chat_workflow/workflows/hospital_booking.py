@@ -13,16 +13,17 @@ class BookingInfo(TypedDict):
     """Structured response for hospital booking."""
     chief_complaint: str  # Brief chief complaint
     date: str  # Preferred date or time
-    location: str  # One of the 3 predefined locations
+    hospital: str  # One of the 3 predefined hospitals
 
 class Router(TypedDict):
     """Worker to route to next. If no workers are needed, route to __end__"""
-    next: Literal["chief_complaint_consultant", "date_picker", "location_selector", "responder"]
+    next: Literal["hospital_finder", "date_picker", "responder"]
     messages: str
 
-class ChiefComplaintResponse(TypedDict):
-    """Structured response for chief_complaint_node."""
+class GeneralPractionerResponse(TypedDict):
+    """Structured response for hospital_finder_node."""
     chief_complaint: str  # Chief complaint provided by the user
+    hospital: str  # Selected hospital based on the user's input
     messages: str  # Any follow-up messages or notes
 
 class DatePickerResponse(TypedDict):
@@ -30,17 +31,12 @@ class DatePickerResponse(TypedDict):
     date: str  # Preferred date or time
     messages: str  # Any follow-up messages or notes
 
-class LocationSelectorResponse(TypedDict):
-    """Structured response for location_selector_node."""
-    location: str  # Selected location based on the user's input
-    messages: str  # Any follow-up messages or notes
-
 # Define the State Class
 class GraphState(BaseState):
     chat_model: str  # Model used by the chatbot
     chief_complaint: str  # Chief complaint
     date: str  # Preferred date or time
-    location: str  # Selected location
+    hospital: str  # Selected hospital
     next: str
 
 # Define the Workflow
@@ -62,7 +58,7 @@ class HospitalBookingWorkflow(BaseWorkflow):
     def chat_profile(cls):
         return cl.ChatProfile(
             name=cls.name(),
-            markdown_description="An assistant that helps with hospital bookings by selecting the appropriate location and scheduling based on the user's needs.",
+            markdown_description="An assistant that helps with hospital bookings by selecting the appropriate hospital and scheduling based on the user's needs.",
             icon="https://cdn3.iconfinder.com/data/icons/hospital-outline/128/hospital-bed.png",
         )
 
@@ -86,8 +82,8 @@ class HospitalBookingWorkflow(BaseWorkflow):
             "chat_model": "gpt-4o-mini",
             "chief_complaint": "",
             "date": "",
-            "location": "",
-            "next": "chief_complaint",
+            "hospital": "",
+            "next": "responder",
         }
 
     def create_graph(self) -> StateGraph:
@@ -96,17 +92,15 @@ class HospitalBookingWorkflow(BaseWorkflow):
 
         # Add nodes (agents)
         graph.add_node("supervisor", self.supervisor_node)
-        graph.add_node("chief_complaint_consultant", self.chief_complaint_node)
+        graph.add_node("hospital_finder", self.hospital_finder_node)
         graph.add_node("date_picker", self.date_picker_node)
-        graph.add_node("location_selector", self.location_selector_node)
         graph.add_node("responder", self.responder_node)
 
         # Add edges (transitions)
         graph.set_entry_point("supervisor")
         graph.add_conditional_edges("supervisor", lambda state: state["next"])
-        graph.add_edge("chief_complaint_consultant", "supervisor")
+        graph.add_edge("hospital_finder", "supervisor")
         graph.add_edge("date_picker", "supervisor")
-        graph.add_edge("location_selector", "supervisor")
         graph.add_edge("responder", END)
 
         return graph
@@ -115,21 +109,25 @@ class HospitalBookingWorkflow(BaseWorkflow):
     async def supervisor_node(self, state: GraphState, config: RunnableConfig) -> GraphState:
         print("Running: supervisor_node")
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a supervisor coordinating tasks between agents to collect hospital booking details.  
-Based on the current state:
-- Assign the next agent (`chief_complaint_consultant`, `date_picker`, `location_selector`, or `responder`) to perform a task.
-- Include any instructions or context for the agent in your response.
-- If the booking is complete, assign the responder agent to communicate with the user.
+You are a supervisor coordinating tasks between the AI agents (`hospital_finder`, `date_picker`, `responder`) to help user book for a hospital visit.  
+
+Instructions
+- If user input is required, assign the 'responder'.
+- If chief_complaint or hospital not clear, assign the 'hospital_finder'.
+- If date not clear, assign the 'date_picker'.
+- When done, assign the 'responder'.
 
 Current progress:
-- Chief complaint: {chief_complaint}
-- Preferred date: {date}
-- Selected location: {location}
+- chief_complaint: {chief_complaint}
+- date: {date}
+- hospital: {hospital}
         """)
         prompt = ChatPromptTemplate.from_messages([
             system_prompt,
             MessagesPlaceholder(variable_name="messages"),
         ])
+
+        print(f"supervisor_node state: {state}")
 
         llm = llm_factory.create_model(
             self.output_chat_model,
@@ -142,11 +140,25 @@ Current progress:
         state.update({"messages": [{"role": "ai", "content": response["messages"]}], "next": response["next"]})
         return state
 
-    async def chief_complaint_node(self, state: GraphState, config: RunnableConfig) -> GraphState:
-        print("Running: chief_complaint_node")
+    async def hospital_finder_node(self, state: GraphState, config: RunnableConfig) -> GraphState:
+        
+        print("Running: hospital_finder_node")
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an agent responsible for collecting the user's chief complaint.  
-Ask the user for a brief description of their health concern or reason for booking.
+You are a hospital finder, supervised by an AI Agent. You are responsible for clarifying user's chief complaint in order to suggest the right hospital.
+
+Available hospitals for booking:
+- BV Chợ Rẫy: General health and emergency services.
+- BV ĐH Y Dược: Specialized in internal medicine and diagnostics.
+- BV Ung Bướu: Focused on cancer treatment.
+
+Instructions:
+- Update chief_comlaint and hospital.
+- Include a brief status message to tell the supervisor if you are done, or you need additional clarifications from user.
+
+Current progress:
+- chief_comlaint: {chief_complaint}
+- hospital: {hospital}
+
         """)
         prompt = ChatPromptTemplate.from_messages([
             system_prompt,
@@ -156,14 +168,15 @@ Ask the user for a brief description of their health concern or reason for booki
         llm = llm_factory.create_model(
             self.output_chat_model,
             model=state["chat_model"]
-        ).with_structured_output(ChiefComplaintResponse)
+        ).with_structured_output(GeneralPractionerResponse)
         chain: Runnable = prompt | llm
 
         response = await chain.ainvoke(state, config=config)
-        print(f"chief_complaint_node response: {response}")
+        print(f"hospital_finder_node response: {response}")
 
         state.update({
             "chief_complaint": response["chief_complaint"],
+            "hospital": response["hospital"],
             "messages": [{"role": "assistant", "content": response["messages"]}]
         })
         return state
@@ -171,8 +184,14 @@ Ask the user for a brief description of their health concern or reason for booki
     async def date_picker_node(self, state: GraphState, config: RunnableConfig) -> GraphState:
         print("Running: date_picker_node")
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an agent responsible for selecting the user's preferred date or time for the appointment.  
-Ask the user for their preferred schedule.
+You are an scheduling agent, supervised by an AI Agent.
+
+Instructions:
+- Update the booking date based on user preference.
+- If user hasn't indicate their time prefernece, ask the supervisor to provide it.
+- Booking date must fit with user preference and at least 4 hours from now (2024-12-12T13:00:00).
+
+Current bookingdate: {date}
         """)
         prompt = ChatPromptTemplate.from_messages([
             system_prompt,
@@ -194,49 +213,21 @@ Ask the user for their preferred schedule.
         })
         return state
 
-    async def location_selector_node(self, state: GraphState, config: RunnableConfig) -> GraphState:
-        print("Running: location_selector_node")
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an agent responsible for selecting the most appropriate hospital location based on the user's chief complaint.  
-Available locations:
-- BV Chợ Rẫy: General health and emergency services.
-- BV ĐH Y Dược: Specialized in internal medicine and diagnostics.
-- BH Ung Bướu: Focused on cancer treatment.
-
-Chief complaint: {chief_complaint}
-
-Choose the most suitable location and explain the reasoning.
-        """)
-        prompt = ChatPromptTemplate.from_messages([
-            system_prompt,
-            MessagesPlaceholder(variable_name="messages"),
-        ])
-
-        llm = llm_factory.create_model(
-            self.output_chat_model,
-            model=state["chat_model"]
-        ).with_structured_output(LocationSelectorResponse)
-        chain: Runnable = prompt | llm
-
-        response = await chain.ainvoke(state, config=config)
-        print(f"location_selector_node response: {response}")
-
-        state.update({
-            "location": response["location"],
-            "messages": [{"role": "assistant", "content": response["messages"]}]
-        })
-        return state
 
     async def responder_node(self, state: GraphState, config: RunnableConfig) -> GraphState:
         print("Running: responder_node")
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a helpful AI assistant confirming the hospital booking details to the user.
-Booking details:
-- Chief complaint: {chief_complaint}
-- Preferred date: {date}
-- Selected location: {location}
+You are a helpful AI Assistant that will converse with the user to help them book a hospital visit. 
+Only use the language as user's language.
 
-Confirm the details with the user or ask for any corrections if necessary.
+Current booking details:
+- chief_complaint: {chief_complaint}
+- date: {date}
+- hospital: {hospital}
+
+You are supervised by an AI Agent, which will guide you how to talk with user.
+
+If booking details are all clear, show them to the user when responding.
         """)
         prompt = ChatPromptTemplate.from_messages([
             system_prompt,
@@ -251,5 +242,5 @@ Confirm the details with the user or ask for any corrections if necessary.
 
         response = await chain.ainvoke(state, config=config)
         print(f"responder_node response: {response}")
-        state.update({"messages": [{"role": "assistant", "content": response}]})
+        state.update({"messages": [response]})
         return state
